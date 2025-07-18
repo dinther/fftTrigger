@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>FFT with Dual Range Sliders per Bin</title>
+<style>
+  body {
+    font-family: sans-serif;
+    background: #121212;
+    color: #eee;
+    padding: 20px;
+  }
+
+  #display {
+    display: grid;
+    grid-template-columns: 80px 1fr 60px;
+    gap: 0px;
+    font-family: sans-serif;
+    align-items: start;
+    position: relative;
+    width: 100%;
+    align-items: center;
+  }
+
+  #ui {
+    flex: 1;
+    height: 100%;
+    position: relative;
+  }
+
+  canvas {
+    display: inherit;
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    grid-column-start: 2;
+    grid-column-end: 3;
+    grid-row-start: 1;
+    grid-row-end: -1;
+    background: #000;
+  }
+
+  .freqlbl{
+    font-size: 0.7em;
+    margin-right: 19px;
+    justify-self: end;
+  }
+
+  .dbscale{
+    grid-column-start: 2;
+    grid-column-end: 3;
+    height: 30px;
+  }
+
+  .slider-container {
+    flex:1;
+    margin-left: 0px;
+    margin-right: -11px;
+  }
+  #slidercontainer {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    margin: 0;
+    flex-direction: column;
+    z-index: 4;
+    justify-content: space-between;
+  }
+
+  .bincontrols{
+    display: flex;
+  }
+
+  label, select, button, input {
+    display: block;
+    margin-top: 1em;
+    width: 100%;
+    font-size: 1em;
+  }
+  .bin-control {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 0.5em;
+    flex-wrap: wrap;
+  }
+  .bin-label {
+    width: 50px;
+    font-weight: bold;
+    user-select: none;
+  }
+  .timeout-input {
+    margin: 0;
+    margin-left: 13px;
+  }
+
+  .rrange-values {
+    font-size: 0.85em;
+    color: #ccc;
+    margin-left: 8px;
+    min-width: 70px;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>FFT with Dual Range Sliders per Bin</h1>
+<div>
+<label for="audioSource">Audio Input Device:</label>
+<select id="audioSource"></select>
+</div>
+
+<div>
+<label for="fftSize">Channels:</label>
+<select id="fftSize">
+  <option value="4">2</option>
+  <option value="8">4</option>
+  <option value="16">8</option>
+  <option value="32" selected>16</option>
+  <option value="64">32</option>
+  <option value="128">64</option>
+  <option value="256">128</option>
+  <option value="512">256</option>
+  <option value="1024">512</option>
+  <option value="2048">1024</option>
+  <option value="4096">2048</option>
+</select>
+</div>
+
+<div>
+<label for="bpmInput">Smoothing:</label>
+<input type="number" id="smoothingInput" value="0.8" min="0" max="1" step="0.02"/>
+</div>
+
+<div>
+<label for="bpmInput">BPM:</label>
+<input type="number" id="bpmInput" value="120" min="10" max="400" />
+</div>
+
+<button id="startBtn">Start Analysis</button>
+<br>
+<div id="display">
+    <canvas id = 'fftcanvas' width="1024" ></canvas>
+</div>
+
+
+
+<script type = 'module'>
+    import {RangeSlider} from './rangeslider.js'
+  
+
+  const audioSelect = document.getElementById('audioSource');
+  const fftSizeSelect = document.getElementById('fftSize');
+  const startBtn = document.getElementById('startBtn');
+  const display = document.getElementById('display');
+  const canvas = document.getElementById('fftcanvas');
+  const bpmInput = document.getElementById('bpmInput');
+  const smoothingInput = document.getElementById('smoothingInput');
+  smoothingInput.addEventListener('input', e =>{
+    analyser.smoothingTimeConstant = parseFloat(smoothingInput.value);
+  });
+
+  const ctx = canvas.getContext('2d');
+  var nyquist;
+  var minDb;
+  var maxDb;
+  var binGroup;
+
+  let audioContext, analyser, animationId;
+  let rangeSettings = [];
+  let triggered = [];
+  let lastTriggerTime = [];
+  let triggerFlashTime = [];
+  const flashDuration = 500; // ms flash duration
+  var barHeightPx;
+
+  async function listAudioInputs() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices; //devices.filter(d => d.kind === 'audioinput');
+    audioSelect.innerHTML = '';
+    inputs.forEach(device => {
+      const opt = document.createElement('option');
+      opt.value = device.deviceId;
+      opt.text = device.label || `Microphone ${audioSelect.length + 1}`;
+      audioSelect.appendChild(opt);
+    });
+  }
+
+  function createBinControls(binCount) {
+    rangeSettings = [];
+    triggered = new Array(binCount).fill(false);
+    lastTriggerTime = new Array(binCount).fill(0);
+    triggerFlashTime = new Array(binCount).fill(0);
+    canvas.height = binCount * 20;
+    barHeightPx = (canvas.height / binCount);
+
+    for (let i = 0; i < binCount; i++) {
+      let freqLbl = document.createElement('div');
+      freqLbl.classList.add('freqlbl');
+      let freq = (i / binCount) * nyquist;
+      let freqHz = freq < 1 ? 1 : freq;
+      freqLbl.innerText = `${freqHz.toFixed(0)} Hz`;
+      display.appendChild(freqLbl);   
+      
+      const slider = new RangeSlider(display, {
+        min: minDb,
+        max: maxDb,
+        step: 0.01,
+        initialMin: minDb,
+        initialMax: minDb,
+      });
+
+      // Timeout input
+      let timeoutInput = document.createElement('input');
+      timeoutInput.id = 'input' + i;
+      timeoutInput.type = 'number';
+      timeoutInput.min = 0;
+      timeoutInput.max = 10;
+      timeoutInput.step = 0.1;
+      timeoutInput.value = '1';
+      timeoutInput.className = 'timeout-input';
+      timeoutInput.title = "Timeout (beats)";
+      display.appendChild(timeoutInput);
+
+      rangeSettings.push({
+        getMin: () => parseFloat(slider.minRange.value),
+        getMax: () => parseFloat(slider.maxRange.value),
+        getTimeout: () => parseFloat(timeoutInput.value),
+        // For future: setMin, setMax, etc. if needed
+      });
+    }
+
+    canvas.style.gridRowEnd = binCount + 1;
+
+    // Draw dB scale on X-axis (bottom)
+    const dbStep = 10;
+    //  create DB scale
+    let dbScale = document.createElement('div');
+    dbScale.classList.add('dbscale');
+    display.appendChild(dbScale);
+
+
+    const width = canvas.width;
+    for (let db = Math.ceil(minDb / dbStep) * dbStep; db <= maxDb; db += dbStep) {
+      const x = ((db - minDb) / (maxDb - minDb)) * width;
+      //ctx.fillText(`${db} dB`, x, canvas.height - marginBottom + 7);
+    }
+
+  }
+
+  function handleBinTrigger(binIndex, value) {
+    console.log(`🔔 Bin ${binIndex} triggered at ${value.toFixed(2)} dB`);
+    triggerFlashTime[binIndex] = performance.now();
+  }
+
+  async function startAnalysis() {
+    if (animationId) cancelAnimationFrame(animationId);
+    if (audioContext) await audioContext.close();
+
+    const fftSize = parseInt(fftSizeSelect.value, 10);
+    binGroup = fftSize < 32? 32 / fftSize : 1;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: audioSelect.value ? { exact: audioSelect.value } : undefined }
+    });
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioContext.createMediaStreamSource(stream);
+
+    analyser = audioContext.createAnalyser();
+    analyser.minDecibels = -100
+    analyser.maxDecibels = -20
+    minDb = analyser.minDecibels;
+    maxDb = analyser.maxDecibels;
+    analyser.fftSize = Math.max(32, fftSize);
+    analyser.smoothingTimeConstant = parseFloat(smoothingInput.value);
+
+    source.connect(analyser);
+    //source.connect(audioContext.destination);
+
+    const binCount = analyser.frequencyBinCount;
+    const dbArray = new Float32Array(binCount);
+    const sampleRate = audioContext.sampleRate;
+    nyquist = sampleRate / 2;    
+
+    createBinControls(binCount / binGroup);
+
+    function draw() {
+      animationId = requestAnimationFrame(draw);
+      analyser.getFloatFrequencyData(dbArray);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw bars and trigger LEDs
+      const now = performance.now();
+      const bpm = parseFloat(bpmInput.value);
+      const beatMs = 60000 / bpm;
+//    const binCount = fftSize==16? analyser.frequencyBinCount / 2 : analyser.frequencyBinCount;
+      let count = fftSize<32? binCount / binGroup : binCount;
+      //let step = fftSize==16? 2: 1;
+      let index = 0;
+      let channel = 0;
+      for (let i = 0; i < count; i++) {
+        let value = 0;
+        if (binGroup > 1){
+          for (let j=0; j < binGroup; j++){
+            value += dbArray[index + j];
+          }
+          value = value / binGroup;
+        } else {
+          value = dbArray[index];
+        }
+        //const value = fftSize==16? (dbArray[index] + dbArray[index + 1]) / 2  : dbArray[index];
+        index+= binGroup;
+        const min = rangeSettings[i].getMin();
+        const max = rangeSettings[i].getMax();
+        const beats = rangeSettings[i].getTimeout();
+        const timeout = beats * beatMs;
+
+        const inRange = value >= min && value <= max;
+        const elapsed = now - lastTriggerTime[i];
+
+        if (!triggered[i] && inRange && elapsed >= timeout) {
+          handleBinTrigger(i, value);
+          triggered[i] = true;
+          lastTriggerTime[i] = now;
+        }
+        if (!inRange) triggered[i] = false;
+
+        const norm = (value - minDb) / (maxDb - minDb);
+        const barLength = Math.max(0, norm) * canvas.width;
+
+        const y = i * barHeightPx;
+
+        // Bar color by hue
+        const hue = (i / count) * 360;
+        ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+        ctx.fillRect(0, y+3, barLength, barHeightPx-2);
+
+        // Trigger LED indicator on right side (circle)
+        const flashElapsed = now - triggerFlashTime[i];
+        if (flashElapsed < flashDuration) {
+          const alpha = 1 - flashElapsed / flashDuration;
+          const ledX = canvas.width - 18;
+          const ledY = y + barHeightPx / 2;
+          const ledRadius = 8;
+
+          ctx.beginPath();
+          ctx.arc(ledX, ledY, ledRadius, 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(255,0,0,${alpha})`;
+          ctx.shadowColor = `rgba(255,255,255,${alpha})`;
+          ctx.shadowBlur = 10;
+          ctx.fill();
+
+          // Colored glow matching bar hue:
+          ctx.shadowColor = `hsl(${hue}, 100%, 70%)`;
+          ctx.shadowBlur = 15;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+      }
+    }
+
+    draw();
+
+  }
+
+  (async () => {
+    try {
+      const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      await listAudioInputs();
+      tempStream.getTracks().forEach(track => track.stop());
+    } catch (err) {
+      alert("Microphone access is required.");
+    }
+  })();
+
+  navigator.mediaDevices.addEventListener('devicechange', listAudioInputs);
+  startBtn.addEventListener('click', startAnalysis);
+</script>
+</body>
+</html>
